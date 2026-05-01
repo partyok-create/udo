@@ -1,7 +1,7 @@
 # 🎨 우도 팝아트 쿠키팩토리
 ### Pop Art Cookie Factory — Exterior Painting Design
 
-![thumbnail](thumbnail.png)
+![thumbnail](https://raw.githubusercontent.com/partyok-create/udo/main/thumbnail.png)
 
 ---
 
