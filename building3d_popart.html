@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>팝아트 건물 3D 채색 시뮬레이션</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #1a1a2e; font-family: sans-serif; overflow: hidden; }
+  #container { position: relative; width: 100vw; height: 100vh; }
+  #c { width: 100%; height: 100%; display: block; cursor: grab; }
+  #c:active { cursor: grabbing; }
+  #ui {
+    position: absolute; top: 14px; left: 14px;
+    background: rgba(0,0,0,0.65); color: #fff;
+    border-radius: 10px; padding: 10px 14px;
+    font-size: 12px; line-height: 1.9; backdrop-filter: blur(4px);
+    border: 0.5px solid rgba(255,255,255,0.15);
+  }
+  #title {
+    position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,0.7); color: #FFE000;
+    border-radius: 20px; padding: 6px 18px;
+    font-size: 13px; font-weight: 600; letter-spacing: .06em;
+    white-space: nowrap; border: 0.5px solid rgba(255,228,0,0.3);
+  }
+  #faceLabel {
+    position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,0.65); color: #fff;
+    border-radius: 10px; padding: 7px 18px;
+    font-size: 12px; text-align: center;
+    border: 0.5px solid rgba(255,255,255,0.15);
+  }
+  #viewBtns {
+    position: absolute; top: 14px; right: 14px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .vbtn {
+    background: rgba(0,0,0,0.65); color: #fff;
+    border: 0.5px solid rgba(255,255,255,0.2);
+    border-radius: 8px; padding: 6px 14px;
+    font-size: 11px; cursor: pointer; text-align: center;
+    backdrop-filter: blur(4px); transition: background 0.15s;
+  }
+  .vbtn:hover { background: rgba(255,228,0,0.3); border-color: #FFE000; color: #FFE000; }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="c"></canvas>
+  <div id="title">🎨 팝아트 건물 3D 채색 시뮬레이션</div>
+  <div id="ui">
+    🖱️ <b>드래그</b> — 회전<br>
+    🖱️ <b>스크롤</b> — 줌<br>
+    📱 <b>터치</b> — 회전/핀치줌
+  </div>
+  <div id="viewBtns">
+    <div class="vbtn" onclick="setView('front')">🔲 정면</div>
+    <div class="vbtn" onclick="setView('left')">◀ 좌측</div>
+    <div class="vbtn" onclick="setView('back')">🔳 후면</div>
+    <div class="vbtn" onclick="setView('right')">▶ 우측</div>
+    <div class="vbtn" onclick="setView('top')">⬆ 상단</div>
+    <div class="vbtn" onclick="setView('iso')">♦ 아이소</div>
+  </div>
+  <div id="faceLabel">건물을 드래그하여 360° 회전하세요</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ─── SETUP ───────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const container = document.getElementById('container');
+const W = () => container.offsetWidth;
+const H = () => container.offsetHeight;
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+renderer.setSize(W(), H());
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xC8D8E8);
+scene.fog = new THREE.FogExp2(0xC8D8E8, 0.018);
+
+const camera = new THREE.PerspectiveCamera(45, W() / H(), 0.1, 200);
+camera.position.set(10, 6, 14);
+
+// ─── LIGHTS ──────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0xffffff, 0.65));
+const sun = new THREE.DirectionalLight(0xfff8e8, 1.1);
+sun.position.set(8, 14, 10);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.near = 0.5;
+sun.shadow.camera.far = 60;
+sun.shadow.camera.left = -15; sun.shadow.camera.right = 15;
+sun.shadow.camera.top = 15; sun.shadow.camera.bottom = -15;
+scene.add(sun);
+const fill = new THREE.DirectionalLight(0xd0e8ff, 0.4);
+fill.position.set(-6, 4, -8);
+scene.add(fill);
+const rim = new THREE.DirectionalLight(0xffe8d0, 0.25);
+rim.position.set(0, 2, -12);
+scene.add(rim);
+
+// ─── ORBIT CONTROLS ──────────────────────────────────────────
+const orbit = {
+  dragging: false,
+  lastX: 0, lastY: 0,
+  theta: 0.55, phi: 0.32,
+  radius: 18,
+  target: new THREE.Vector3(0, 2, 0),
+  targetTheta: 0.55, targetPhi: 0.32, targetRadius: 18
+};
+
+function applyOrbit() {
+  orbit.theta += (orbit.targetTheta - orbit.theta) * 0.12;
+  orbit.phi   += (orbit.targetPhi   - orbit.phi)   * 0.12;
+  orbit.radius+= (orbit.targetRadius- orbit.radius) * 0.12;
+  const { theta, phi, radius, target } = orbit;
+  camera.position.set(
+    target.x + radius * Math.sin(theta) * Math.cos(phi),
+    target.y + radius * Math.sin(phi),
+    target.z + radius * Math.cos(theta) * Math.cos(phi)
+  );
+  camera.lookAt(target);
+}
+
+canvas.addEventListener('mousedown', e => { orbit.dragging = true; orbit.lastX = e.clientX; orbit.lastY = e.clientY; });
+window.addEventListener('mouseup', () => orbit.dragging = false);
+window.addEventListener('mousemove', e => {
+  if (!orbit.dragging) return;
+  orbit.targetTheta -= (e.clientX - orbit.lastX) * 0.012;
+  orbit.targetPhi = Math.max(0.04, Math.min(Math.PI/2 - 0.04, orbit.targetPhi + (e.clientY - orbit.lastY) * 0.012));
+  orbit.lastX = e.clientX; orbit.lastY = e.clientY;
+});
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  orbit.targetRadius = Math.max(4, Math.min(40, orbit.targetRadius + e.deltaY * 0.025));
+}, { passive: false });
+
+// Touch
+let prevTouch = null, prevTouchDist = null;
+canvas.addEventListener('touchstart', e => {
+  if (e.touches.length === 1) { orbit.dragging = true; orbit.lastX = e.touches[0].clientX; orbit.lastY = e.touches[0].clientY; }
+  if (e.touches.length === 2) { prevTouchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY); }
+});
+canvas.addEventListener('touchend', () => { orbit.dragging = false; prevTouchDist = null; });
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (e.touches.length === 1 && orbit.dragging) {
+    orbit.targetTheta -= (e.touches[0].clientX - orbit.lastX) * 0.012;
+    orbit.targetPhi = Math.max(0.04, Math.min(Math.PI/2 - 0.04, orbit.targetPhi + (e.touches[0].clientY - orbit.lastY) * 0.012));
+    orbit.lastX = e.touches[0].clientX; orbit.lastY = e.touches[0].clientY;
+  }
+  if (e.touches.length === 2 && prevTouchDist) {
+    const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+    orbit.targetRadius = Math.max(4, Math.min(40, orbit.targetRadius - (d - prevTouchDist) * 0.05));
+    prevTouchDist = d;
+  }
+}, { passive: false });
+
+function setView(v) {
+  const views = {
+    front: { theta: 0, phi: 0.25, r: 20 },
+    left:  { theta: Math.PI/2, phi: 0.25, r: 18 },
+    back:  { theta: Math.PI, phi: 0.25, r: 20 },
+    right: { theta: -Math.PI/2, phi: 0.25, r: 18 },
+    top:   { theta: 0.55, phi: Math.PI/2 - 0.05, r: 22 },
+    iso:   { theta: 0.55, phi: 0.32, r: 18 }
+  };
+  const vv = views[v];
+  orbit.targetTheta = vv.theta; orbit.targetPhi = vv.phi; orbit.targetRadius = vv.r;
+}
+
+// ─── TEXTURE FACTORY ─────────────────────────────────────────
+function makeTex(fn, w = 256, h = 256) {
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d');
+  fn(ctx, w, h);
+  return new THREE.CanvasTexture(cv);
+}
+function mat(t) { return new THREE.MeshLambertMaterial({ map: t, side: THREE.FrontSide }); }
+function matC(color) { return new THREE.MeshLambertMaterial({ color }); }
+
+// ─── PATTERN FUNCTIONS ────────────────────────────────────────
+function diagTex(c1, c2, sw = 30, W = 256, H = 256) {
+  return makeTex((ctx, w, h) => {
+    ctx.fillStyle = c1; ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = c2;
+    for (let i = -h; i < w + h; i += sw * 2) {
+      ctx.beginPath();
+      ctx.moveTo(i, 0); ctx.lineTo(i + sw, 0);
+      ctx.lineTo(i + sw - h, h); ctx.lineTo(i - h, h);
+      ctx.closePath(); ctx.fill();
+    }
+    ctx.strokeStyle = '#111'; ctx.lineWidth = 5; ctx.strokeRect(2, 2, w - 4, h - 4);
+  }, W, H);
+}
+
+function checkerTex(c1, c2, sz = 32) {
+  return makeTex((ctx, w, h) => {
+    for (let r = 0; r * sz < h + sz; r++)
+      for (let c = 0; c * sz < w + sz; c++) {
+        ctx.fillStyle = (r + c) % 2 === 0 ? c1 : c2;
+        ctx.fillRect(c * sz, r * sz, sz, sz);
+      }
+    ctx.strokeStyle = '#111'; ctx.lineWidth = 5; ctx.strokeRect(2, 2, w - 4, h - 4);
+  });
+}
+
+function solidTex(color) {
+  return makeTex((ctx, w, h) => {
+    ctx.fillStyle = color; ctx.fillRect(0, 0, w, h);
+    ctx.strokeStyle = '#111'; ctx.lineWidth = 5; ctx.strokeRect(2, 2, w - 4, h - 4);
+  });
+}
+
+function ovalTex(bg, oc) {
+  return makeTex((ctx, w, h) => {
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, w, h);
+    ctx.beginPath(); ctx.ellipse(w / 2, h / 2, w * 0.41, h * 0.32, 0, 0, Math.PI * 2);
+    ctx.fillStyle = oc; ctx.fill();
+    ctx.strokeStyle = '#111'; ctx.lineWidth = 2.5; ctx.stroke();
+    ctx.strokeStyle = '#111'; ctx.lineWidth = 5; ctx.strokeRect(2, 2, w - 4, h - 4);
+  });
+}
+
+function rainbowTex() {
+  return makeTex((ctx, w, h) => {
+    const cols = ['#E31212','#FF6600','#FFE000','#00CC44','#0044DD','#CC00CC','#FF3399'];
+    cols.forEach((c, i) => { ctx.fillStyle = c; ctx.fillRect(i * w / 7, 0, w / 7 + 1, h); });
+    ctx.strokeStyle = '#111'; ctx.lineWidth = 5; ctx.strokeRect(2, 2, w - 4, h - 4);
+  });
+}
+
+function targetTex(bg, c1, c2) {
+  return makeTex((ctx, w, h) => {
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, w, h);
+    [[c1, 0.40], [bg, 0.25], [c2, 0.12]].forEach(([c, r]) => {
+      ctx.beginPath(); ctx.arc(w / 2, h / 2, Math.min(w, h) * r, 0, Math.PI * 2);
+      ctx.fillStyle = c; ctx.fill();
+    });
+    ctx.strokeStyle = '#111'; ctx.lineWidth = 5; ctx.strokeRect(2, 2, w - 4, h - 4);
+  });
+}
+
+function windowGridTex(bg, rows = 2, cols = 3) {
+  return makeTex((ctx, w, h) => {
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, w, h);
+    const pw = w / (cols + 0.5), ph = h / (rows + 0.5);
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+      const x = pw * 0.25 + c * pw, y = ph * 0.25 + r * ph;
+      const ww = pw * 0.68, wh = ph * 0.68;
+      ctx.fillStyle = '#6699CC'; ctx.fillRect(x, y, ww, wh);
+      ctx.strokeStyle = '#335577'; ctx.lineWidth = 1.5; ctx.strokeRect(x, y, ww, wh);
+      ctx.beginPath();
+      ctx.moveTo(x + ww / 2, y); ctx.lineTo(x + ww / 2, y + wh);
+      ctx.moveTo(x, y + wh / 2); ctx.lineTo(x + ww, y + wh / 2);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = '#111'; ctx.lineWidth = 5; ctx.strokeRect(2, 2, w - 4, h - 4);
+  });
+}
+
+function glassTex(mullions = false) {
+  return makeTex((ctx, w, h) => {
+    ctx.fillStyle = '#C5DCF0'; ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = 'rgba(220,240,255,0.45)'; ctx.fillRect(0, 0, w, h * 0.12);
+    if (mullions) {
+      const cols = ['#E31212','#FF6600','#FFE000','#00CC44','#0044DD','#CC00CC','#FF3399','#E31212','#00CCCC','#FF6600','#FFE000','#00CC44','#0044DD'];
+      const sw = w / 13;
+      cols.forEach((c, i) => {
+        ctx.fillStyle = c; ctx.fillRect(sw * i, 0, 2, h);
+      });
+    }
+    ctx.strokeStyle = '#335577'; ctx.lineWidth = 4; ctx.strokeRect(2, 2, w - 4, h - 4);
+  }, 512, 256);
+}
+
+function parapatTex() {
+  return makeTex((ctx,w,h)=>{
+    const cells = [
+      _diag('#E31212','#FFFFFF',18),          // 1: 빨강+흰 대각
+      _chk('#0044DD','#FFE000',h/3),           // 2: 파랑+노랑 체커
+      _vstr(['#00CC44','#CCFF00','#00CC44','#CCFF00','#00CC44']), // 3: 초록+라임 수직줄
+      _tgt('#FF6600','#E31212','#FFE000'),     // 4: 주황+빨강 타깃
+      _diag('#7B5EA7','#00CCCC',18),           // 5: 보라+시안 대각
+      _oval('#FF3399','#FFFFFF'),              // 6: 핫핑크+흰 타원
+      _vstr(['#FFE000','#0044DD','#FFE000','#0044DD','#FFE000']), // 7: 노랑+파랑 수직줄
+      _chk('#CCFF00','#111111',h/3),           // 8: 라임+검정 체커
+      _diag('#00CCCC','#FF00AA',18),           // 9: 시안+마젠타 대각
+      _tgt('#7B5EA7','#FFE000','#FF3399'),     // 10: 보라+노랑 타깃
+    ];
+    const cw = w / 10;
+    cells.forEach((fn, i) => {
+      ctx.save();
+      ctx.beginPath(); ctx.rect(i*cw, 0, cw, h); ctx.clip();
+      ctx.translate(i*cw, 0);
+      fn(ctx, cw, h);
+      ctx.restore();
+    });
+    // 칸 구분선
+    ctx.strokeStyle = '#111'; ctx.lineWidth = 2;
+    for (let i=1; i<10; i++) {
+      ctx.beginPath(); ctx.moveTo(i*cw,0); ctx.lineTo(i*cw,h); ctx.stroke();
+    }
+    ctx.strokeStyle = '#111'; ctx.lineWidth = 5; ctx.strokeRect(2,2,w-4,h-4);
+  }, 1024, 128);
+}
+
+function triangleTex(bg, tc) {
+  return makeTex((ctx, w, h) => {
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, w, h);
+    ctx.beginPath(); ctx.moveTo(w / 2, h * 0.08); ctx.lineTo(w * 0.08, h * 0.92); ctx.lineTo(w * 0.92, h * 0.92); ctx.closePath();
+    ctx.fillStyle = tc; ctx.fill(); ctx.strokeStyle = '#111'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.strokeStyle = '#111'; ctx.lineWidth = 5; ctx.strokeRect(2, 2, w - 4, h - 4);
+  });
+}
+
+function vertStripeTex(colors) {
+  return makeTex((ctx, w, h) => {
+    const sw = w / colors.length;
+    colors.forEach((c, i) => { ctx.fillStyle = c; ctx.fillRect(i * sw, 0, sw + 1, h); });
+    ctx.strokeStyle = '#111'; ctx.lineWidth = 5; ctx.strokeRect(2, 2, w - 4, h - 4);
+  });
+}
+
+// ─── GRID FACE TEXTURE (여러 패턴을 격자로 배치) ─────────────
+// cells: 2D 패턴 함수 배열 (row-major), cols/rows: 격자 분할 수
+function _diag(c1,c2,sw=28){ return (ctx,w,h)=>{ ctx.fillStyle=c1;ctx.fillRect(0,0,w,h);ctx.fillStyle=c2;for(let i=-h;i<w+h;i+=sw*2){ctx.beginPath();ctx.moveTo(i,0);ctx.lineTo(i+sw,0);ctx.lineTo(i+sw-h,h);ctx.lineTo(i-h,h);ctx.closePath();ctx.fill();}}; }
+function _chk(c1,c2,sz=18){ return (ctx,w,h)=>{ for(let r=0;r*sz<h+sz;r++) for(let c=0;c*sz<w+sz;c++){ctx.fillStyle=(r+c)%2===0?c1:c2;ctx.fillRect(c*sz,r*sz,sz,sz);} }; }
+function _tgt(bg,c1,c2,c3){ return (ctx,w,h)=>{ ctx.fillStyle=bg;ctx.fillRect(0,0,w,h);const R=Math.min(w,h)*0.46;[[c1,R],[bg,R*0.65],[c2,R*0.38],[bg,R*0.18],[c3||c1,R*0.08]].forEach(([c,r])=>{ctx.beginPath();ctx.arc(w/2,h/2,r,0,Math.PI*2);ctx.fillStyle=c;ctx.fill();}); }; }
+function _oval(bg,oc){ return (ctx,w,h)=>{ ctx.fillStyle=bg;ctx.fillRect(0,0,w,h);ctx.beginPath();ctx.ellipse(w/2,h/2,w*0.40,h*0.30,0,0,Math.PI*2);ctx.fillStyle=oc;ctx.fill();ctx.strokeStyle='#111';ctx.lineWidth=2;ctx.stroke(); }; }
+function _vstr(colors){ return (ctx,w,h)=>{ const sw=w/colors.length;colors.forEach((c,i)=>{ctx.fillStyle=c;ctx.fillRect(i*sw,0,sw+1,h);}); }; }
+function _solid(c){ return (ctx,w,h)=>{ ctx.fillStyle=c;ctx.fillRect(0,0,w,h); }; }
+
+function gridFaceTex(cells, cols, rows, W=256, H=256){
+  return makeTex((ctx,w,h)=>{
+    const cw=w/cols, ch=h/rows;
+    cells.forEach((drawFn,i)=>{
+      const col=i%cols, row=Math.floor(i/cols);
+      ctx.save();
+      ctx.beginPath(); ctx.rect(col*cw,row*ch,cw,ch); ctx.clip();
+      ctx.translate(col*cw,row*ch);
+      drawFn(ctx,cw,ch);
+      ctx.restore();
+    });
+    // 격자 경계선
+    ctx.strokeStyle='#111'; ctx.lineWidth=3;
+    for(let c=1;c<cols;c++){ctx.beginPath();ctx.moveTo(c*cw,0);ctx.lineTo(c*cw,h);ctx.stroke();}
+    for(let r=1;r<rows;r++){ctx.beginPath();ctx.moveTo(0,r*ch);ctx.lineTo(w,r*ch);ctx.stroke();}
+    ctx.strokeStyle='#111'; ctx.lineWidth=5; ctx.strokeRect(2,2,w-4,h-4);
+  }, W, H);
+}
+
+// 삼각지붕 경사면용 파랑+노랑 대각 (타워 전용)
+const ROOF_DIAG = makeTex((ctx,w,h)=>{
+  _diag('#0044DD','#FFE000',36)(ctx,w,h);
+}, 256, 256);
+
+// 타워 gable end: 파랑+노랑 대각
+const GABLE_END = makeTex((ctx,w,h)=>{
+  _diag('#0044DD','#FFE000',36)(ctx,w,h);
+  ctx.strokeStyle='#111'; ctx.lineWidth=4; ctx.strokeRect(2,2,w-4,h-4);
+}, 256, 256);
+
+// 메인동 gable end: 3분할 패턴
+// (ShapeGeometry UV: u=x/width, v=y/height, flipY=true → canvas 아래=삼각 하단)
+const MAIN_GABLE_END = makeTex((ctx,w,h)=>{
+  const t1=w/3, t2=2*w/3;
+  const sw=20;
+  // ① 좌측 1/3: 짙은 카키 + 하단 1/5 노랑+파랑 굵은 줄무늬
+  ctx.fillStyle='#6B5C3A'; ctx.fillRect(0,0,t1,h);
+  const bandY=h*0.8, bh=h-bandY;
+  ctx.fillStyle='#FFE000'; ctx.fillRect(0,bandY,t1,bh);
+  ctx.save(); ctx.beginPath(); ctx.rect(0,bandY,t1,bh); ctx.clip();
+  ctx.fillStyle='#0044DD';
+  for(let i=-bh;i<t1+bh;i+=sw*2){
+    ctx.beginPath();ctx.moveTo(i,bandY);ctx.lineTo(i+sw,bandY);
+    ctx.lineTo(i+sw-bh,h);ctx.lineTo(i-bh,h);ctx.closePath();ctx.fill();
+  }
+  ctx.restore();
+  // ② 가운데 1/3: 수직 줄무늬 (노랑+파랑)
+  ctx.fillStyle='#FFE000'; ctx.fillRect(t1,0,t2-t1,h);
+  for(let x=t1;x<t2;x+=sw*2){ ctx.fillStyle='#0044DD'; ctx.fillRect(x,0,sw,h); }
+  // ③ 우측 1/3: 파랑 80% + 하단 노랑 줄무늬 1개
+  ctx.fillStyle='#0044DD'; ctx.fillRect(t2,0,w-t2,h);
+  ctx.fillStyle='#FFE000'; ctx.fillRect(t2,h*0.86,w-t2,h*0.14);
+  // 구분선 + 테두리
+  ctx.strokeStyle='#111'; ctx.lineWidth=3;
+  [t1,t2].forEach(x=>{ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h);ctx.stroke();});
+  ctx.strokeStyle='#111'; ctx.lineWidth=5; ctx.strokeRect(2,2,w-4,h-4);
+}, 512, 256);
+
+// 카키 단색 (짙은 올리브카키)
+const KHAKI = makeTex((ctx,w,h)=>{ ctx.fillStyle='#9A8B68'; ctx.fillRect(0,0,w,h); });
+const TRIM  = makeTex((ctx, w, h) => {
+  ctx.fillStyle = '#0044DD'; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#FFE000';
+  const sw = 28;
+  for (let i = -h; i < w + h; i += sw * 2) {
+    ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i + sw, 0); ctx.lineTo(i + sw - h, h); ctx.lineTo(i - h, h); ctx.closePath(); ctx.fill();
+  }
+}, 256, 64);
+
+// ─── BUILDING HELPERS ─────────────────────────────────────────
+function box(w, h, d, x, y, z, mats) {
+  const geo = new THREE.BoxGeometry(w, h, d);
+  const mesh = new THREE.Mesh(geo, Array.isArray(mats) ? mats : new Array(6).fill(mats));
+  mesh.position.set(x, y, z);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+  return mesh;
+}
+
+// face material order: [+x right, -x left, +y top, -y bottom, +z front, -z back]
+function M(t) { return new THREE.MeshLambertMaterial({ map: t }); }
+function Mc(c) { return new THREE.MeshLambertMaterial({ color: c }); }
+
+// ── 공통 gable 로직 (slopeTex: 좌경사, gableEndTex: 삼각벽, slopeTex2: 우경사 별도) ─────
+function _buildGable(rW, rH, rD, cx, cy, cz, slopeTex, gableEndTex, slopeTex2) {
+  const sL = Math.sqrt((rW / 2) ** 2 + rH ** 2) + 0.04;
+  const ang = Math.atan2(rH, rW / 2);
+  const th = 0.14;
+  const blueMat = new THREE.MeshLambertMaterial({ color: 0x0044DD, side: THREE.FrontSide });
+
+  function makeSlopeMats(tex) {
+    return [
+      new THREE.MeshLambertMaterial({ map: tex }),
+      new THREE.MeshLambertMaterial({ map: tex }),
+      new THREE.MeshLambertMaterial({ map: tex }),
+      blueMat,
+      new THREE.MeshLambertMaterial({ map: tex }),
+      new THREE.MeshLambertMaterial({ map: tex }),
+    ];
+  }
+
+  const trMat = new THREE.MeshLambertMaterial({ map: TRIM });
+  const lm = new THREE.Mesh(new THREE.BoxGeometry(sL, th, rD), makeSlopeMats(slopeTex));
+  lm.position.set(cx - rW / 4, cy + rH / 2, cz);
+  lm.rotation.z = ang; lm.castShadow = true; scene.add(lm);
+  const rm = new THREE.Mesh(new THREE.BoxGeometry(sL, th, rD), makeSlopeMats(slopeTex2 || slopeTex));
+  rm.position.set(cx + rW / 4, cy + rH / 2, cz);
+  rm.rotation.z = -ang; rm.castShadow = true; scene.add(rm);
+  const ridge = new THREE.Mesh(new THREE.BoxGeometry(th * 1.8, th * 1.8, rD + 0.08), trMat);
+  ridge.position.set(cx, cy + rH, cz); scene.add(ridge);
+  const eaveL = sL + 0.06;
+  [[cx - rW/4, cy, ang], [cx + rW/4, cy, -ang]].forEach(([ex, ey, rz]) => {
+    const em = new THREE.Mesh(new THREE.BoxGeometry(eaveL, th * 0.9, th * 0.9), trMat);
+    em.position.set(ex, ey, cz); em.rotation.z = rz; scene.add(em);
+  });
+  // ── 삼각 gable end 벽면 — 법선 정확히 바깥 방향으로 고정 ──
+  function makeTriWall(flipNormal) {
+    const verts = new Float32Array([
+      -rW/2, 0, 0,
+       rW/2, 0, 0,
+       0,   rH, 0,
+    ]);
+    const n = flipNormal ? -1 : 1;
+    const norms = new Float32Array([0,0,n, 0,0,n, 0,0,n]);
+    const uvs   = new Float32Array([0,0, 1,0, 0.5,1]);
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+    g.setAttribute('normal',   new THREE.BufferAttribute(norms, 3));
+    g.setAttribute('uv',       new THREE.BufferAttribute(uvs,   2));
+    return g;
+  }
+
+  // 정면 삼각벽 — DoubleSide로 모든 각도에서 보이도록
+  const wallMatF = gableEndTex
+    ? new THREE.MeshLambertMaterial({ map: gableEndTex, side: THREE.DoubleSide })
+    : new THREE.MeshLambertMaterial({ color: 0x0044DD, side: THREE.DoubleSide });
+  const wallF = new THREE.Mesh(makeTriWall(false), wallMatF);
+  wallF.position.set(cx, cy, cz + rD/2 + 0.02);
+  scene.add(wallF);
+
+  // 후면 삼각벽 — DoubleSide
+  const wallMatB = gableEndTex
+    ? new THREE.MeshLambertMaterial({ map: gableEndTex, side: THREE.DoubleSide })
+    : new THREE.MeshLambertMaterial({ color: 0x0044DD, side: THREE.DoubleSide });
+  const wallB = new THREE.Mesh(makeTriWall(true), wallMatB);
+  wallB.position.set(cx, cy, cz - rD/2 - 0.02);
+  scene.add(wallB);
+
+  // 테두리 선
+  const pts = [[-rW/2,0],[rW/2,0],[0,rH],[-rW/2,0]].map(([x,y]) => new THREE.Vector3(x+cx,y+cy,0));
+  [cz + rD/2 + 0.03, cz - rD/2 - 0.03].forEach(ez => {
+    const lGeo = new THREE.BufferGeometry().setFromPoints(pts.map(p => new THREE.Vector3(p.x,p.y,ez)));
+    scene.add(new THREE.Line(lGeo, new THREE.LineBasicMaterial({ color: 0x111111 })));
+  });
+}
+// 타워 삼각벽: 파랑+노랑 수직줄 텍스처
+const TOWER_WALL_TEX = makeTex((ctx,w,h)=>{
+  const sw = 28;
+  ctx.fillStyle = '#FFE000'; ctx.fillRect(0,0,w,h);
+  for(let x=0; x<w; x+=sw*2){
+    ctx.fillStyle='#0044DD'; ctx.fillRect(x,0,sw,h);
+  }
+  // 하단 대각 trim 띠
+  const bh = h * 0.14;
+  ctx.fillStyle='#0044DD'; ctx.fillRect(0,h-bh,w,bh);
+  ctx.fillStyle='#FFE000';
+  for(let i=-(bh);i<w+bh;i+=18*2){
+    ctx.beginPath();
+    ctx.moveTo(i,h-bh); ctx.lineTo(i+18,h-bh);
+    ctx.lineTo(i+18-bh,h); ctx.lineTo(i-bh,h);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.strokeStyle='#111'; ctx.lineWidth=4; ctx.strokeRect(2,2,w-4,h-4);
+}, 256, 256);
+
+// 타워 지붕: 경사면=파랑+노랑 대각, 삼각벽=파랑+노랑 수직줄
+function towerGableRoof(rW, rH, rD, cx, cy, cz) { _buildGable(rW, rH, rD, cx, cy, cz, ROOF_DIAG, TOWER_WALL_TEX); }
+// 메인동 지붕 경사면 3종 텍스처 (2색 조합)
+const SLOPE_L = makeTex((ctx,w,h)=>{ _diag('#FF3399','#FFFFFF',32)(ctx,w,h); }); // 좌: 핫핑크+흰 대각
+const SLOPE_M = makeTex((ctx,w,h)=>{                                              // 중: 빨강+노랑 수평줄
+  const sh = h/6;
+  for(let i=0;i<6;i++){ ctx.fillStyle=i%2===0?'#E31212':'#FFE000'; ctx.fillRect(0,i*sh,w,sh+1); }
+});
+const SLOPE_R = makeTex((ctx,w,h)=>{ _diag('#00CCCC','#00CC44',32)(ctx,w,h); }); // 우: 시안+초록 대각
+
+// 우경사 단색 텍스처 3종
+const SLOPE_R2_L = makeTex((ctx,w,h)=>{ ctx.fillStyle='#FF3399'; ctx.fillRect(0,0,w,h); }); // 좌지붕 우경사: 핫핑크 단색
+const SLOPE_R2_M = makeTex((ctx,w,h)=>{ ctx.fillStyle='#E31212'; ctx.fillRect(0,0,w,h); }); // 중지붕 우경사: 빨강 단색
+const SLOPE_R2_R = makeTex((ctx,w,h)=>{ ctx.fillStyle='#00CC44'; ctx.fillRect(0,0,w,h); }); // 우지붕 우경사: 초록 단색
+
+// 메인동 지붕: 경사면=개별 텍스처, 삼각벽=endTex
+function gableRoof(rW, rH, rD, cx, cy, cz, endTex, slopeTex, slopeTex2) {
+  _buildGable(rW, rH, rD, cx, cy, cz, slopeTex || KHAKI, endTex || null, slopeTex2 || null);
+}
+
+// F5 삼각벽 3종 텍스처
+const F5_L = makeTex((ctx,w,h)=>{ _diag('#7B5EA7','#FFE000',36)(ctx,w,h); ctx.strokeStyle='#111';ctx.lineWidth=4;ctx.strokeRect(2,2,w-4,h-4); }); // 좌: 보라+노랑 대각
+const F5_M = makeTex((ctx,w,h)=>{ _chk('#FF6600','#111111',32)(ctx,w,h);  ctx.strokeStyle='#111';ctx.lineWidth=4;ctx.strokeRect(2,2,w-4,h-4); }); // 중: 주황+검정 체커
+const F5_R = makeTex((ctx,w,h)=>{ _tgt('#FF6600','#0044DD','#E31212','#FF6600')(ctx,w,h); ctx.strokeStyle='#111';ctx.lineWidth=4;ctx.strokeRect(2,2,w-4,h-4); }); // 우: 주황+파랑+빨강 동심원 타깃
+
+// 평지붕: 상면 = 파랑+노랑 대각줄무늬, 측면 4방향 = TRIM
+function flatRoof(w, d, cx, cy, cz) {
+  const th = 0.14;
+  const mats = [M(TRIM), M(TRIM), M(ROOF_DIAG), Mc(0x888888), M(TRIM), M(TRIM)];
+  box(w, th, d, cx, cy, cz, mats);
+}
+
+// Overlay plane on a face
+function facePanel(w, h, x, y, z, rotY, tex) {
+  const geo = new THREE.PlaneGeometry(w, h);
+  const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: tex, depthTest: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }));
+  mesh.position.set(x, y, z);
+  if (rotY) mesh.rotation.y = rotY;
+  scene.add(mesh);
+}
+
+function _hstripe(c1,c2,n=4){ return (ctx,w,h)=>{ const sh=h/n; for(let i=0;i<n;i++){ctx.fillStyle=i%2===0?c1:c2;ctx.fillRect(0,i*sh,w,sh+1);} }; }
+function _ovalOutline(bg){ return (ctx,w,h)=>{ ctx.fillStyle=bg;ctx.fillRect(0,0,w,h);ctx.beginPath();ctx.ellipse(w/2,h/2,w*0.40,h*0.32,0,0,Math.PI*2);ctx.strokeStyle='#111';ctx.lineWidth=5;ctx.stroke(); }; }
+function _ovalStripeFill(bg,sc){ return (ctx,w,h)=>{ ctx.fillStyle=bg;ctx.fillRect(0,0,w,h);ctx.save();ctx.beginPath();ctx.ellipse(w/2,h/2,w*0.40,h*0.32,0,0,Math.PI*2);ctx.clip();const sw=w/6;for(let i=0;i<6;i++){ctx.fillStyle=i%2===0?sc:bg;ctx.fillRect(i*sw,0,sw+1,h);}ctx.restore();ctx.beginPath();ctx.ellipse(w/2,h/2,w*0.40,h*0.32,0,0,Math.PI*2);ctx.strokeStyle='#111';ctx.lineWidth=4;ctx.stroke(); }; }
+
+// ── 후면 본관 텍스처 ──────────────────────────────────────────
+// RE-2: 2F 후면 — 3열×2행 (이미지1 6패턴)
+const RE2_BACK = gridFaceTex([
+  _diag('#00CC44','#CCFF00',28),              // 좌상: 초록+라임 대각
+  _vstr(['#0044DD','#00CCCC','#0044DD']),     // 중상: 파랑+시안 수직줄
+  _oval('#0044DD','#FF6600'),                 // 우상: 파랑+주황 타원
+  _ovalOutline('#FFFFFF'),                    // 좌하: 흰+타원 윤곽
+  _chk('#E31212','#FFE000',28),               // 중하: 빨강+노랑 체커
+  _solid('#7B5EA7'),                          // 우하: 보라 단색
+], 3, 2, 768, 256);
+
+// RE-4: 1F 후면 — 3열×4행 (이미지2 12패턴)
+const RE4_BACK = gridFaceTex([
+  _hstripe('#00CCCC','#FF6600',6),            // 좌상: 시안+주황 수평줄
+  _vstr(['#CCFF00','#0044DD','#00CC44']),     // 중상: 라임+파랑+초록
+  _ovalOutline('#FFE000'),                    // 우상: 노랑+타원 윤곽
+  _solid('#FF6600'),                          // 좌중상: 주황 단색
+  _vstr(['#CCFF00','#0044DD','#00CC44']),     // 중중상: 라임+파랑+초록
+  _vstr(['#CCFF00','#00CC44']),               // 우중상: 라임+초록
+  _chk('#E31212','#FF3399',28),              // 좌중하: 빨강+핫핑크 체커
+  _vstr(['#CCFF00','#0044DD','#00CC44']),     // 중중하: 라임+파랑+초록
+  _vstr(['#CCFF00','#00CC44']),               // 우중하: 라임+초록
+  _ovalStripeFill('#FFFFFF','#FFE000'),       // 좌하: 흰+노랑줄 타원
+  _solid('#FF3399'),                          // 중하: 핫핑크 단색
+  _diag('#7B5EA7','#FFE000',26),             // 우하: 보라+노랑 대각
+], 3, 4, 768, 512);
+
+// Ground
+const gnd = new THREE.Mesh(
+  new THREE.PlaneGeometry(60, 60),
+  new THREE.MeshLambertMaterial({ color: 0xC8C0B0 })
+);
+gnd.rotation.x = -Math.PI / 2;
+gnd.position.y = -0.02;
+gnd.receiveShadow = true;
+scene.add(gnd);
+
+// Grid on ground
+const grid = new THREE.GridHelper(60, 60, 0xA8A098, 0xB8B0A0);
+grid.position.y = -0.01;
+scene.add(grid);
+
+// ── TOWER ────────────────────────────────────────────────────
+// [+x right, -x left, +y top, -y bottom, +z front, -z back]
+box(2, 5, 2, -4.5, 2.5, 0, [
+  M(rainbowTex()),               // right: F2 레인보우
+  M(gridFaceTex([               // left: LS-1 — 2×3 격자 팝아트
+    _vstr(['#00CC44','#FF6600','#00CC44','#FF6600']), _chk('#00CC44','#0044DD',18),
+    _tgt('#FF6600','#E31212','#FFE000','#00CC44'),    _vstr(['#FFE000','#00CC44','#FFE000','#00CC44']),
+    _oval('#FF6600','#FFF'),                           _chk('#FFE000','#00CC44',18),
+  ], 2, 3, 256, 512)),
+  Mc(0xB8A870),                  // top: covered by roof
+  Mc(0x888888),                  // bottom
+  M(windowGridTex('#E31212', 4, 3)), // front: F3 빨강+창격자
+  M(diagTex('#FFE000','#E31212')), // back: RE-T 노랑+빨강
+]);
+towerGableRoof(2.3, 1.1, 2.2, -4.5, 5, 0);
+
+// ── MAIN BODY 2F ─────────────────────────────────────────────
+box(7, 1.5, 2, 0, 2.75, 0, [
+  M(checkerTex('#FF6600','#111')),  // right: LS-2 주황+검정
+  M(triangleTex('#CCFF00','#E31212')), // left: RS-M1 라임+빨강삼각
+  Mc(0xB8A870),
+  Mc(0x888888),
+  M(diagTex('#FF3399','#FFF', 28)), // front: F6 마젠타+흰색
+  M(RE2_BACK), // back: RE-2 3×2 격자
+]);
+
+// F7 통창 overlay on 2F front (단일 통창)
+facePanel(6.6, 1.0, 0, 2.75, 1.01, 0, glassTex(false));
+
+// 3 Gable roofs — 좌경사:패턴 / 우경사:단색
+// 좌지붕: 좌=핫핑크+흰대각, 우=핫핑크단색 | 중지붕: 좌=빨강+노랑줄, 우=빨강단색 | 우지붕: 좌=시안+초록대각, 우=초록단색
+gableRoof(2.4, 0.9, 2.2, -2.0, 3.5, 0, F5_L, SLOPE_L, SLOPE_R2_L);
+gableRoof(2.4, 0.9, 2.2,  0.5, 3.5, 0, F5_M, SLOPE_M, SLOPE_R2_M);
+gableRoof(2.4, 0.9, 2.2,  3.0, 3.5, 0, F5_R, SLOPE_R, SLOPE_R2_R);
+
+// ── TERRACE SLAB ─────────────────────────────────────────────
+box(7, 0.14, 0.9, 0, 2.07, 1.45, [
+  M(solidTex('#00CCCC')), M(solidTex('#00CCCC')),
+  M(solidTex('#00CCCC')), Mc(0x888888),
+  M(solidTex('#00CCCC')), M(solidTex('#00CCCC')),
+]);
+
+// ── PARAPET / RAILING ─────────────────────────────────────────
+// F8B top rail
+box(7, 0.09, 0.17, 0, 2.645, 1.87, new THREE.MeshLambertMaterial({ map: TRIM }));
+// F8A parapet face
+box(7, 0.60, 0.17, 0, 2.30, 1.87, [
+  M(diagTex('#E31212','#FFF', 22)), // right: RS-M2
+  M(diagTex('#7B5EA7','#FFE000', 22)), // left: LS-3
+  Mc(0xB8A870),
+  Mc(0x888888),
+  M(parapatTex()),                // front: F8A 파라펫
+  M(diagTex('#FF6600','#FFE000', 26)), // back: RE-3
+]);
+
+// ── MAIN BODY 1F ─────────────────────────────────────────────
+box(7, 2.0, 2, 0, 1.0, 0, [
+  M(ovalTex('#E31212','#FFF')),   // right: LS-4
+  M(ovalTex('#7B5EA7','#FFF')),   // left:  RS-M3
+  Mc(0xB8A870),
+  Mc(0x888888),
+  M(checkerTex('#0044DD','#FFF', 22)), // front top band: F10
+  M(RE4_BACK), // back: RE-4 3×4 격자
+]);
+
+// F11 1F glass panel overlay (full front)
+facePanel(6.6, 1.7, 0, 1.0, 1.01, 0, glassTex(true));
+
+// ── RIGHT ANNEX ──────────────────────────────────────────────
+box(2.5, 2.0, 2, 4.75, 1.0, 0, [
+  M(vertStripeTex(['#00CCCC','#FFF','#00CCCC','#FFF','#00CCCC'])), // right: RS-A
+  Mc(0xDDDDDD),
+  Mc(0xB8A870),
+  Mc(0x888888),
+  M(makeTex((ctx,w,h)=>{        // front: F13 — 2×2 격자 팝아트
+    const cw=w/2, ch=h/2;
+    // ① 좌상: 빨강+노랑+주황 수직줄 + 타원 윤곽
+    ctx.save(); ctx.beginPath(); ctx.rect(0,0,cw,ch); ctx.clip();
+    _vstr(['#E31212','#FFE000','#FF6600','#FFE000','#E31212'])(ctx,cw,ch);
+    ctx.beginPath(); ctx.ellipse(cw/2,ch/2,cw*0.40,ch*0.34,0,0,Math.PI*2);
+    ctx.strokeStyle='#111'; ctx.lineWidth=4; ctx.stroke();
+    ctx.restore();
+    // ② 우상: 흰+하늘+파랑 수직줄 + 타원 윤곽
+    ctx.save(); ctx.beginPath(); ctx.rect(cw,0,cw,ch); ctx.clip();
+    ctx.translate(cw,0);
+    _vstr(['#FFFFFF','#87CEEB','#0044DD','#87CEEB','#FFFFFF'])(ctx,cw,ch);
+    ctx.beginPath(); ctx.ellipse(cw/2,ch/2,cw*0.40,ch*0.34,0,0,Math.PI*2);
+    ctx.strokeStyle='#111'; ctx.lineWidth=4; ctx.stroke();
+    ctx.restore();
+    // ③ 좌하: 핫핑크 배경 + 노랑 삼각형
+    ctx.save(); ctx.beginPath(); ctx.rect(0,ch,cw,ch); ctx.clip();
+    ctx.fillStyle='#FF3399'; ctx.fillRect(0,ch,cw,ch);
+    ctx.beginPath();
+    ctx.moveTo(cw/2, ch+ch*0.10);
+    ctx.lineTo(cw*0.10, ch+ch*0.90);
+    ctx.lineTo(cw*0.90, ch+ch*0.90);
+    ctx.closePath();
+    ctx.fillStyle='#FFE000'; ctx.fill();
+    ctx.strokeStyle='#111'; ctx.lineWidth=3; ctx.stroke();
+    ctx.restore();
+    // ④ 우하: 빨강+주황+노랑 수직줄
+    ctx.save(); ctx.beginPath(); ctx.rect(cw,ch,cw,ch); ctx.clip();
+    ctx.translate(cw,ch);
+    _vstr(['#E31212','#FF6600','#FFE000','#FF6600','#E31212'])(ctx,cw,ch);
+    ctx.restore();
+    // 격자 경계 + 테두리
+    ctx.strokeStyle='#111'; ctx.lineWidth=4;
+    ctx.beginPath(); ctx.moveTo(cw,0); ctx.lineTo(cw,h); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0,ch); ctx.lineTo(w,ch); ctx.stroke();
+    ctx.strokeRect(2,2,w-4,h-4);
+  }, 512, 512)),                // front: F13
+  M(ovalTex('#7B5EA7','#FFF')),   // back:  RE-A 보라+흰타원
+]);
+flatRoof(2.6, 2.2, 4.75, 2.07, 0);
+
+// F14 annex windows overlay
+facePanel(1.0, 0.8, 4.2, 1.2, 1.01, 0, glassTex(false));
+facePanel(1.0, 0.8, 5.3, 1.2, 1.01, 0, glassTex(false));
+
+// ── STEP STRUCTURE ────────────────────────────────────────────
+box(1.0, 0.9, 1.0, 6.5, 0.45, 0.2, [
+  M(diagTex('#FF6600','#FFE000', 20)),
+  M(diagTex('#FF6600','#FFE000', 20)),
+  Mc(0xB8A870),
+  Mc(0x888888),
+  M(diagTex('#FF6600','#FFE000', 20)),
+  M(diagTex('#FF6600','#FFE000', 20)),
+]);
+box(0.8, 0.55, 0.8, 6.5, 0.275, -0.5, [
+  M(solidTex('#00CCCC')),
+  M(solidTex('#00CCCC')),
+  Mc(0xB8A870),
+  Mc(0x888888),
+  M(solidTex('#00CCCC')),
+  M(solidTex('#00CCCC')),
+]);
+
+// ── CONNECTING PIECE (tower → main) ──────────────────────────
+box(1.0, 2.0, 2, -2.5, 1.0, 0, [
+  Mc(0xDDDDDD),
+  Mc(0xDDDDDD),
+  Mc(0xB8A870),
+  Mc(0x888888),
+  M(diagTex('#7B5EA7','#FFE000', 24)),
+  M(diagTex('#7B5EA7','#FFE000', 24)),
+]);
+
+// ── DECORATIVE TRIM LINES on roofs ───────────────────────────
+// Horizontal trim bands at top of each wall section
+function trimBand(w, x, y, z) {
+  const mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(w, 0.09, 0.09),
+    new THREE.MeshLambertMaterial({ map: TRIM })
+  );
+  mesh.position.set(x, y, z);
+  scene.add(mesh);
+}
+trimBand(7.1, 0, 4.0, 1.01); // top of 2F front
+trimBand(7.1, 0, 2.0, 1.01); // 1F/2F junction
+
+// ─── ANIMATE ─────────────────────────────────────────────────
+applyOrbit();
+
+function animate() {
+  requestAnimationFrame(animate);
+  applyOrbit();
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener('resize', () => {
+  camera.aspect = W() / H();
+  camera.updateProjectionMatrix();
+  renderer.setSize(W(), H());
+});
+</script>
+</body>
+</html>
